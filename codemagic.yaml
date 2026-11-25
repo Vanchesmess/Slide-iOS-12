@@ -1,28 +1,43 @@
-workflows:
-  ios-12-build:
-    name: Build Slide IPA for iOS 12
-    max_build_duration: 60
-    instance_type: mac_mini_m2
-    environment:
-      # Сейчас latest = Xcode 26.6. Если упрётесь в ошибки Swift в старых Pod'ах,
-      # попробуйте закрепить 16.4 (если он есть в списке Codemagic): xcode: 16.4
-      xcode: latest
-      cocoapods: default
-    scripts:
-      - name: Patch Dystopia API Credentials, Remove Watch/Widgets & Fix Podfile
-        script: |
-          set -ex
-          export LC_ALL=C
+name: Build Slide IPA for iOS 12
 
-          # --- API credentials / URL scheme ---
-          find . -type f \( -name "*.swift" -o -name "*.plist" \) -not -path "./.git/*" -exec sed -i '' 's/r1JeYb6X0P2QOg/XCCJPTbxgTaaQA/g' {} +
-          find . -type f \( -name "*.swift" -o -name "*.plist" \) -not -path "./.git/*" -exec sed -i '' 's|slide://ccrama|dystopia://response|g' {} +
-          find . -type f -name "*.swift" -not -path "./.git/*" -exec sed -i '' 's|/u/ccrama|/u/afterxleep|g' {} +
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios12-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios-12-build:
+    runs-on: macos-15   # Apple Silicon, на образе только Xcode 16.x
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Select Xcode 16.4
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '16.4'
+
+      - name: Patch Dystopia API Credentials, Remove Watch/Widgets & Fix Podfile
+        run: |
+          set -ex
+          export RUBYOPT="-Eutf-8:utf-8"
+
+          LC_ALL=C find . -type f \( -name "*.swift" -o -name "*.plist" \) -not -path "./.git/*" -exec sed -i '' 's/r1JeYb6X0P2QOg/XCCJPTbxgTaaQA/g' {} +
+          LC_ALL=C find . -type f \( -name "*.swift" -o -name "*.plist" \) -not -path "./.git/*" -exec sed -i '' 's|slide://ccrama|dystopia://response|g' {} +
+          LC_ALL=C find . -type f -name "*.swift" -not -path "./.git/*" -exec sed -i '' 's|/u/ccrama|/u/afterxleep|g' {} +
           /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes: string dystopia" "Slide for Reddit/Info.plist" || true
 
-          ruby -e 'require "xcodeproj"' 2>/dev/null || gem install xcodeproj --user-install
+          ruby -e 'require "xcodeproj"' 2>/dev/null || sudo gem install xcodeproj
 
-          # --- Xcode project: оставить только основной таргет ---
           cat > /tmp/fix_project.rb <<'RUBY'
           require "xcodeproj"
           proj_path = "Slide for Reddit.xcodeproj"
@@ -38,7 +53,6 @@ workflows:
                 ph.remove_from_project
               end
             elsif ph.is_a?(Xcodeproj::Project::Object::PBXShellScriptBuildPhase)
-              # SwiftLint (старый x86-бинарник) и Reveal не нужны для сборки
               ph.remove_from_project if ph.name.to_s =~ /swiftlint|reveal/i
             end
           end
@@ -52,14 +66,12 @@ workflows:
           end
           proj.save
 
-          # старая схема ссылается на удалённые таргеты, пересоздаём
           scheme = Xcodeproj::XCScheme.new
           scheme.configure_with_targets(main, nil, launch_target: true)
           scheme.save_as(proj_path, "Slide for Reddit", true)
           RUBY
           ruby /tmp/fix_project.rb
 
-          # --- Podfile: вырезать все таргеты кроме основного (по счётчику do/end) ---
           cat > /tmp/fix_podfile.rb <<'RUBY'
           MAIN = "Slide for Reddit"
           opens  = lambda { |l| l =~ /\bdo\s*(\|[^|]*\|)?\s*(#.*)?$/ || l =~ /^\s*(if|unless|case|begin)\b/ }
@@ -81,6 +93,9 @@ workflows:
           end
           podfile = out.join
           abort "Main target block not found in Podfile" unless podfile =~ /target\s*\(?\s*['"]#{MAIN}['"]/
+
+          podfile.gsub!(/(IPHONEOS_DEPLOYMENT_TARGET['"]\]\s*=\s*)['"]11(?:\.0)?['"]/) { "#{$1}'12.0'" }
+          podfile.sub!(/^(\s*platform\s+:ios\s*,\s*)['"]11(?:\.0)?['"]/) { "#{$1}'12.0'" }
 
           patch = <<~P
             post_install do |installer|
@@ -106,29 +121,30 @@ workflows:
           if grep -nE "Tests|Widget|Watch|Extension" Podfile; then
             echo "WARNING: Podfile still references other targets (see lines above)"
           fi
-                    # --- Патчи исходников под новый SDK ---
+
           cat > /tmp/fix_sources.rb <<'RUBY'
-          # 1) UIFontPickerViewControllerDelegate доступен только с iOS 13: помечаем всё расширение
+          Encoding.default_external = Encoding::UTF_8
+          Encoding.default_internal = Encoding::UTF_8
+
           f = "Slide for Reddit/SettingsFont.swift"
-          s = File.read(f)
+          s = File.read(f, mode: "r:UTF-8")
           unless s =~ /@available\(iOS 1[3-9][^)]*\)\s*\nextension SettingsFont: UIFontPickerViewControllerDelegate/
             s.sub!(/^extension SettingsFont: UIFontPickerViewControllerDelegate \{/,
                    "@available(iOS 13.0, *)\nextension SettingsFont: UIFontPickerViewControllerDelegate {") or puts("WARN: SettingsFont pattern not found")
-            File.write(f, s)
+            File.write(f, s, mode: "w:UTF-8")
           end
 
-          # 2) Starscream.WebSocket vs Network.WebSocket (iOS 26 SDK)
           f = "Slide for Reddit/LiveThreadViewController.swift"
-          s = File.read(f)
+          s = File.read(f, mode: "r:UTF-8")
           n = s.gsub!(/(?<![.\w])WebSocket(?=\?|\()/, "Starscream.WebSocket")
           puts("WARN: WebSocket pattern not found") unless n
-          File.write(f, s)
+          File.write(f, s, mode: "w:UTF-8")
           RUBY
           ruby /tmp/fix_sources.rb
           git diff --stat || true
 
       - name: Install CocoaPods
-        script: |
+        run: |
           set -eo pipefail
           export COCOAPODS_DISABLE_STATS=true
           pod install --repo-update 2>&1 | tee pods.log
@@ -144,16 +160,16 @@ workflows:
 
           cat > /tmp/fix_sdc.rb <<'RUBY'
           Dir["Pods/SDCAlertView/**/*.swift"].each do |f|
-            txt = File.read(f)
+            txt = File.read(f, mode: "r:UTF-8")
             new = txt.gsub(/(?<![.\w])(?<!enum )(?<!class )(?<!struct )(?<!protocol )(?<!typealias )Transition\b/,
                            "SDCAlertView.Transition")
-            File.write(f, new) if new != txt
+            File.write(f, new, mode: "w:UTF-8") if new != txt
           end
           RUBY
           ruby /tmp/fix_sdc.rb
 
       - name: Build unsigned app
-        script: |
+        run: |
           set +e
           xcodebuild clean build \
             -workspace "Slide for Reddit.xcworkspace" \
@@ -171,15 +187,15 @@ workflows:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO > build.log 2>&1
           STATUS=$?
-          grep -E "error:|BUILD SUCCEEDED|BUILD FAILED" build.log || true
+          grep -E "error:|BUILD SUCCEEDED|BUILD FAILED" build.log | cut -c1-400 || true
           if [ $STATUS -ne 0 ]; then
             echo "----- last 100 lines of build.log -----"
-            tail -n 100 build.log
+            tail -n 100 build.log | cut -c1-400
             exit $STATUS
           fi
 
       - name: Package IPA
-        script: |
+        run: |
           set -e
           APP_PATH="build/Build/Products/Release-iphoneos/Slide for Reddit.app"
           echo "Looking for app at: $APP_PATH"
@@ -194,7 +210,14 @@ workflows:
           cp -R "$APP_PATH" Payload/
           zip -r -y Slide_iOS12.ipa Payload
           ls -lh Slide_iOS12.ipa
-    artifacts:
-      - Slide_iOS12.ipa
-      - build.log
-      - pods.log
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: slide-ios12
+          path: |
+            Slide_iOS12.ipa
+            build.log
+            pods.log
+          if-no-files-found: warn
