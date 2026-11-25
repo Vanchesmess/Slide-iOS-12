@@ -48,6 +48,7 @@ jobs:
       - name: Install CocoaPods
         run: |
           pod install || pod install --repo-update
+          sed -i '' 's/\bTransition(/SDCAlertView.Transition(/g' Pods/SDCAlertView/Source/AlertController.swift
 
       - name: Build unsigned app
         run: |
