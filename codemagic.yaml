@@ -9,41 +9,76 @@ workflows:
     scripts:
       - name: Patch Dystopia API Credentials, Remove Watch/Widgets & Fix Podfile
         script: |
+          set -e
           find . -type f \( -name "*.swift" -o -name "*.plist" \) -exec sed -i '' 's/r1JeYb6X0P2QOg/XCCJPTbxgTaaQA/g' {} +
           find . -type f \( -name "*.swift" -o -name "*.plist" \) -exec sed -i '' 's|slide://ccrama|dystopia://response|g' {} +
           find . -type f -name "*.swift" -exec sed -i '' 's|/u/ccrama|/u/afterxleep|g' {} +
           /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes: string dystopia" "Slide for Reddit/Info.plist" || true
-          chmod -R 777 .
 
-          ruby -e '
-            require "xcodeproj"
-            proj = Xcodeproj::Project.open("Slide for Reddit.xcodeproj")
-            proj.targets.each do |t|
-              t.remove_from_project if t.name != "Slide for Reddit"
+          ruby -e 'require "xcodeproj"' 2>/dev/null || gem install xcodeproj --user-install
+
+          cat > /tmp/fix_project.rb <<'RUBY'
+          require "xcodeproj"
+          proj_path = "Slide for Reddit.xcodeproj"
+          proj = Xcodeproj::Project.open(proj_path)
+          main = proj.targets.find { |t| t.name == "Slide for Reddit" }
+          abort "Main target not found" unless main
+
+          main.dependencies.dup.each(&:remove_from_project)
+          main.build_phases.dup.each do |ph|
+            next unless ph.is_a?(Xcodeproj::Project::Object::PBXCopyFilesBuildPhase)
+            if ph.name.to_s =~ /watch|extension|plugin|clip/i ||
+               ["13", "16"].include?(ph.dst_subfolder_spec.to_s)
+              ph.remove_from_project
             end
-            proj.objects.each do |obj|
-              if obj.is_a?(Xcodeproj::Project::Object::PBXTargetDependency) || obj.is_a?(Xcodeproj::Project::Object::PBXContainerItemProxy)
-                obj.remove_from_project
+          end
+          proj.targets.dup.each { |t| t.remove_from_project unless t == main }
+          proj.save
+
+          # recreate shared scheme (old one references removed targets)
+          scheme = Xcodeproj::XCScheme.new
+          scheme.configure_with_targets(main, nil, launch_target: true)
+          scheme.save_as(proj_path, "Slide for Reddit", true)
+          RUBY
+          ruby /tmp/fix_project.rb
+
+          cat > /tmp/fix_podfile.rb <<'RUBY'
+          podfile = File.read("Podfile")
+          podfile.gsub!(/^target ['"](?!Slide for Reddit['"])[^'"]*['"] do.*?^end\n/m, "")
+          patch = <<~P
+            post_install do |installer|
+              installer.pods_project.targets.each do |t|
+                t.build_configurations.each do |c|
+                  c.build_settings["IPHONEOS_DEPLOYMENT_TARGET"] = "12.0"
+                  c.build_settings["CODE_SIGNING_ALLOWED"] = "NO"
+                  c.build_settings["GCC_TREAT_WARNINGS_AS_ERRORS"] = "NO"
+                  c.build_settings["SWIFT_TREAT_WARNINGS_AS_ERRORS"] = "NO"
+                end
               end
-            end
-            proj.save
-          '
+          P
+          if podfile.include?("post_install do |installer|")
+            podfile.sub!("post_install do |installer|", patch.chomp)
+          else
+            podfile += "\n#{patch}end\n"
+          end
+          File.write("Podfile", podfile)
+          RUBY
+          ruby /tmp/fix_podfile.rb
+          echo "----- Podfile -----"; cat Podfile
 
-          ruby -e '
-            podfile = File.read("Podfile")
-            podfile.gsub!(/target '\''(?!Slide for Reddit'\'').*?end\n/m, "")
-            patch = "post_install do |installer|\n  installer.pods_project.targets.each do |t|\n    t.build_configurations.each do |c|\n      c.build_settings[\"IPHONEOS_DEPLOYMENT_TARGET\"] = \"12.0\"\n      c.build_settings[\"CODE_SIGNING_ALLOWED\"] = \"NO\"\n      c.build_settings[\"GCC_TREAT_WARNINGS_AS_ERRORS\"] = \"NO\"\n      c.build_settings[\"SWIFT_TREAT_WARNINGS_AS_ERRORS\"] = \"NO\"\n    end\n  end\n"
-            if podfile.include?("post_install do |installer|")
-              podfile.sub!("post_install do |installer|", patch)
-            else
-              podfile += "\n#{patch}end\n"
-            end
-            File.write("Podfile", podfile)
-          '
       - name: Install CocoaPods
         script: |
           pod install || pod install --repo-update
-          sed -i '' 's/\bTransition(/SDCAlertView.Transition(/g' Pods/SDCAlertView/Source/AlertController.swift
+          cat > /tmp/fix_sdc.rb <<'RUBY'
+          Dir["Pods/SDCAlertView/**/*.swift"].each do |f|
+            txt = File.read(f)
+            new = txt.gsub(/(?<![.\w])(?<!enum )(?<!class )(?<!struct )(?<!protocol )(?<!typealias )Transition\b/,
+                           "SDCAlertView.Transition")
+            File.write(f, new) if new != txt
+          end
+          RUBY
+          ruby /tmp/fix_sdc.rb
+
       - name: Build unsigned app
         script: |
           set -o pipefail
@@ -53,25 +88,29 @@ workflows:
             -configuration Release \
             -sdk iphoneos \
             -arch arm64 \
+            -derivedDataPath build \
             IPHONEOS_DEPLOYMENT_TARGET=12.0 \
             GCC_TREAT_WARNINGS_AS_ERRORS=NO \
             SWIFT_TREAT_WARNINGS_AS_ERRORS=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            ONLY_ACTIVE_ARCH=NO | grep -E "error:|BUILD SUCCEEDED|BUILD FAILED"
+            ONLY_ACTIVE_ARCH=NO 2>&1 | tee build.log | grep -E "error:|BUILD SUCCEEDED|BUILD FAILED"
+
       - name: Package IPA
         script: |
-          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "Slide for Reddit.app" -path "*/Release-iphoneos/*" | head -n 1)
-          echo "Found app at: $APP_PATH"
-          if [ -z "$APP_PATH" ]; then
+          APP_PATH="build/Build/Products/Release-iphoneos/Slide for Reddit.app"
+          echo "Looking for app at: $APP_PATH"
+          if [ ! -d "$APP_PATH" ]; then
             echo "ERROR: .app bundle not found!"
+            tail -n 80 build.log
             exit 1
           fi
-          ls -lh "$APP_PATH"
+          rm -rf Payload Slide_iOS12.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
-          zip -r Slide_iOS12.ipa Payload
+          zip -r -y Slide_iOS12.ipa Payload
           ls -lh Slide_iOS12.ipa
     artifacts:
       - Slide_iOS12.ipa
+      - build.log
