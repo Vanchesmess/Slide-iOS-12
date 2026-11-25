@@ -43,6 +43,7 @@ workflows:
       - name: Install CocoaPods
         script: |
           pod install || pod install --repo-update
+          sed -i '' 's/\bTransition(/SDCAlertView.Transition(/g' Pods/SDCAlertView/Source/AlertController.swift
       - name: Build unsigned app
         script: |
           set -o pipefail
