@@ -19,13 +19,11 @@ workflows:
             require "xcodeproj"
             proj = Xcodeproj::Project.open("Slide for Reddit.xcodeproj")
             proj.targets.each do |t|
-              if t.name != "Slide for Reddit"
-                t.remove_from_project
-              end
+              t.remove_from_project if t.name != "Slide for Reddit"
             end
-            proj.main_group.recursive_children.each do |child|
-              if child.is_a?(Xcodeproj::Project::Object::PBXTargetDependency) || child.is_a?(Xcodeproj::Project::Object::PBXContainerItemProxy)
-                child.remove_from_project
+            proj.objects.each do |obj|
+              if obj.is_a?(Xcodeproj::Project::Object::PBXTargetDependency) || obj.is_a?(Xcodeproj::Project::Object::PBXContainerItemProxy)
+                obj.remove_from_project
               end
             end
             proj.save
@@ -34,7 +32,7 @@ workflows:
           ruby -e '
             podfile = File.read("Podfile")
             podfile.gsub!(/target '\''(?!Slide for Reddit'\'').*?end\n/m, "")
-            patch = "post_install do |installer|\n  installer.pods_project.targets.each do |t|\n    t.build_configurations.each do |c|\n      c.build_settings[\"IPHONEOS_DEPLOYMENT_TARGET\"] = \"12.0\"\n      c.build_settings[\"CODE_SIGNING_ALLOWED\"] = \"NO\"\n    end\n  end\n"
+            patch = "post_install do |installer|\n  installer.pods_project.targets.each do |t|\n    t.build_configurations.each do |c|\n      c.build_settings[\"IPHONEOS_DEPLOYMENT_TARGET\"] = \"12.0\"\n      c.build_settings[\"CODE_SIGNING_ALLOWED\"] = \"NO\"\n      c.build_settings[\"SWIFT_VERSION\"] = \"5.0\"\n      c.build_settings[\"SWIFT_STRICT_CONCURRENCY\"] = \"minimal\"\n      c.build_settings[\"GCC_TREAT_WARNINGS_AS_ERRORS\"] = \"NO\"\n      c.build_settings[\"SWIFT_TREAT_WARNINGS_AS_ERRORS\"] = \"NO\"\n      c.build_settings[\"CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER\"] = \"NO\"\n    end\n  end\n"
             if podfile.include?("post_install do |installer|")
               podfile.sub!("post_install do |installer|", patch)
             else
@@ -54,11 +52,15 @@ workflows:
             -sdk iphoneos \
             -arch arm64 \
             IPHONEOS_DEPLOYMENT_TARGET=12.0 \
+            SWIFT_VERSION=5.0 \
+            SWIFT_STRICT_CONCURRENCY=minimal \
+            GCC_TREAT_WARNINGS_AS_ERRORS=NO \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             ONLY_ACTIVE_ARCH=NO \
-            SYMROOT=$(PWD)/build
+            SYMROOT=$(PWD)/build | grep -E "error:|BUILD SUCCEEDED|BUILD FAILED" || exit ${PIPESTATUS[0]}
       - name: Package IPA
         script: |
           mkdir -p Payload
