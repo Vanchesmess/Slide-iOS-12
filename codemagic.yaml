@@ -1,0 +1,51 @@
+workflows:
+  ios-12-build:
+    name: Build Slide IPA for iOS 12
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    environment:
+      xcode: 15.0
+      cocoapods: default
+    scripts:
+      - name: Patch Dystopia API Credentials & Podfile
+        script: |
+          find . -type f \( -name "*.swift" -o -name "*.plist" \) -exec sed -i '' 's/r1JeYb6X0P2QOg/XCCJPTbxgTaaQA/g' {} +
+          find . -type f \( -name "*.swift" -o -name "*.plist" \) -exec sed -i '' 's|slide://ccrama|dystopia://response|g' {} +
+          find . -type f -name "*.swift" -exec sed -i '' 's|/u/ccrama|/u/afterxleep|g' {} +
+          /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes: string dystopia" "Slide for Reddit/Info.plist" || true
+          chmod -R 777 .
+          cat << 'EOF' >> Podfile
+          
+          post_install do |installer|
+            installer.pods_project.targets.each do |target|
+              target.build_configurations.each do |config|
+                config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '12.0'
+                config.build_settings['CODE_SIGNING_ALLOWED'] = 'NO'
+              end
+            end
+          end
+          EOF
+      - name: Install CocoaPods
+        script: |
+          pod install || pod install --repo-update
+      - name: Build unsigned app
+        script: |
+          xcodebuild clean build \
+            -workspace "Slide for Reddit.xcworkspace" \
+            -scheme "Slide for Reddit" \
+            -configuration Release \
+            -sdk iphoneos \
+            -arch arm64 \
+            IPHONEOS_DEPLOYMENT_TARGET=12.0 \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=NO \
+            SYMROOT=$(PWD)/build
+      - name: Package IPA
+        script: |
+          mkdir -p Payload
+          cp -r "build/Release-iphoneos/Slide for Reddit.app" Payload/
+          zip -r Slide_iOS12.ipa Payload
+    artifacts:
+      - Slide_iOS12.ipa
