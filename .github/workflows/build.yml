@@ -32,7 +32,7 @@ workflows:
           ruby -e '
             podfile = File.read("Podfile")
             podfile.gsub!(/target '\''(?!Slide for Reddit'\'').*?end\n/m, "")
-            patch = "post_install do |installer|\n  installer.pods_project.targets.each do |t|\n    t.build_configurations.each do |c|\n      c.build_settings[\"IPHONEOS_DEPLOYMENT_TARGET\"] = \"12.0\"\n      c.build_settings[\"CODE_SIGNING_ALLOWED\"] = \"NO\"\n      c.build_settings[\"SWIFT_VERSION\"] = \"5.0\"\n      c.build_settings[\"SWIFT_STRICT_CONCURRENCY\"] = \"minimal\"\n      c.build_settings[\"GCC_TREAT_WARNINGS_AS_ERRORS\"] = \"NO\"\n      c.build_settings[\"SWIFT_TREAT_WARNINGS_AS_ERRORS\"] = \"NO\"\n      c.build_settings[\"CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER\"] = \"NO\"\n    end\n  end\n"
+            patch = "post_install do |installer|\n  installer.pods_project.targets.each do |t|\n    t.build_configurations.each do |c|\n      c.build_settings[\"IPHONEOS_DEPLOYMENT_TARGET\"] = \"12.0\"\n      c.build_settings[\"CODE_SIGNING_ALLOWED\"] = \"NO\"\n      c.build_settings[\"GCC_TREAT_WARNINGS_AS_ERRORS\"] = \"NO\"\n      c.build_settings[\"SWIFT_TREAT_WARNINGS_AS_ERRORS\"] = \"NO\"\n    end\n  end\n"
             if podfile.include?("post_install do |installer|")
               podfile.sub!("post_install do |installer|", patch)
             else
@@ -45,6 +45,7 @@ workflows:
           pod install || pod install --repo-update
       - name: Build unsigned app
         script: |
+          set -o pipefail
           xcodebuild clean build \
             -workspace "Slide for Reddit.xcworkspace" \
             -scheme "Slide for Reddit" \
@@ -52,19 +53,24 @@ workflows:
             -sdk iphoneos \
             -arch arm64 \
             IPHONEOS_DEPLOYMENT_TARGET=12.0 \
-            SWIFT_VERSION=5.0 \
-            SWIFT_STRICT_CONCURRENCY=minimal \
             GCC_TREAT_WARNINGS_AS_ERRORS=NO \
             SWIFT_TREAT_WARNINGS_AS_ERRORS=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            ONLY_ACTIVE_ARCH=NO \
-            SYMROOT=$(PWD)/build | grep -E "error:|BUILD SUCCEEDED|BUILD FAILED" || exit ${PIPESTATUS[0]}
+            ONLY_ACTIVE_ARCH=NO | grep -E "error:|BUILD SUCCEEDED|BUILD FAILED"
       - name: Package IPA
         script: |
+          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name "Slide for Reddit.app" -path "*/Release-iphoneos/*" | head -n 1)
+          echo "Found app at: $APP_PATH"
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: .app bundle not found!"
+            exit 1
+          fi
+          ls -lh "$APP_PATH"
           mkdir -p Payload
-          cp -r "build/Release-iphoneos/Slide for Reddit.app" Payload/
+          cp -R "$APP_PATH" Payload/
           zip -r Slide_iOS12.ipa Payload
+          ls -lh Slide_iOS12.ipa
     artifacts:
       - Slide_iOS12.ipa
