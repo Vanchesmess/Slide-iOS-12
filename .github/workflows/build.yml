@@ -1,25 +1,39 @@
-name: Build Slide IPA for iOS 12
-
-on:
-  workflow_dispatch:
-
-jobs:
-  build:
-    runs-on: macos-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Patch Dystopia API Credentials & Podfile
-        run: |
+workflows:
+  ios-12-build:
+    name: Build Slide IPA for iOS 12
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    environment:
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Patch Dystopia API Credentials, Remove Watch/Widgets & Fix Podfile
+        script: |
           find . -type f \( -name "*.swift" -o -name "*.plist" \) -exec sed -i '' 's/r1JeYb6X0P2QOg/XCCJPTbxgTaaQA/g' {} +
           find . -type f \( -name "*.swift" -o -name "*.plist" \) -exec sed -i '' 's|slide://ccrama|dystopia://response|g' {} +
           find . -type f -name "*.swift" -exec sed -i '' 's|/u/ccrama|/u/afterxleep|g' {} +
           /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes: string dystopia" "Slide for Reddit/Info.plist" || true
           chmod -R 777 .
+
+          ruby -e '
+            require "xcodeproj"
+            proj = Xcodeproj::Project.open("Slide for Reddit.xcodeproj")
+            proj.targets.each do |t|
+              if t.name != "Slide for Reddit"
+                t.remove_from_project
+              end
+            end
+            proj.main_group.recursive_children.each do |child|
+              if child.is_a?(Xcodeproj::Project::Object::PBXTargetDependency) || child.is_a?(Xcodeproj::Project::Object::PBXContainerItemProxy)
+                child.remove_from_project
+              end
+            end
+            proj.save
+          '
+
           ruby -e '
             podfile = File.read("Podfile")
+            podfile.gsub!(/target '\''(?!Slide for Reddit'\'').*?end\n/m, "")
             patch = "post_install do |installer|\n  installer.pods_project.targets.each do |t|\n    t.build_configurations.each do |c|\n      c.build_settings[\"IPHONEOS_DEPLOYMENT_TARGET\"] = \"12.0\"\n      c.build_settings[\"CODE_SIGNING_ALLOWED\"] = \"NO\"\n    end\n  end\n"
             if podfile.include?("post_install do |installer|")
               podfile.sub!("post_install do |installer|", patch)
@@ -28,13 +42,11 @@ jobs:
             end
             File.write("Podfile", podfile)
           '
-
       - name: Install CocoaPods
-        run: |
+        script: |
           pod install || pod install --repo-update
-
       - name: Build unsigned app
-        run: |
+        script: |
           xcodebuild clean build \
             -workspace "Slide for Reddit.xcworkspace" \
             -scheme "Slide for Reddit" \
@@ -47,15 +59,10 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             ONLY_ACTIVE_ARCH=NO \
             SYMROOT=$(PWD)/build
-
       - name: Package IPA
-        run: |
+        script: |
           mkdir -p Payload
           cp -r "build/Release-iphoneos/Slide for Reddit.app" Payload/
           zip -r Slide_iOS12.ipa Payload
-
-      - name: Upload IPA
-        uses: actions/upload-artifact@v4
-        with:
-          name: Slide_iOS12
-          path: Slide_iOS12.ipa
+    artifacts:
+      - Slide_iOS12.ipa
