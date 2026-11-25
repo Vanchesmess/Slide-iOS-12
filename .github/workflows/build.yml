@@ -1,21 +1,33 @@
-workflows:
+name: Build Slide IPA for iOS 12
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
   ios-12-build:
-    name: Build Slide IPA for iOS 12
-    max_build_duration: 60
-    instance_type: mac_mini_m2
-    environment:
-      xcode: latest
-      cocoapods: default
-    scripts:
+    runs-on: macos-14
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
       - name: Patch Dystopia API Credentials, Remove Watch/Widgets & Fix Podfile
-        script: |
+        run: |
           set -e
           find . -type f \( -name "*.swift" -o -name "*.plist" \) -exec sed -i '' 's/r1JeYb6X0P2QOg/XCCJPTbxgTaaQA/g' {} +
           find . -type f \( -name "*.swift" -o -name "*.plist" \) -exec sed -i '' 's|slide://ccrama|dystopia://response|g' {} +
           find . -type f -name "*.swift" -exec sed -i '' 's|/u/ccrama|/u/afterxleep|g' {} +
           /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes: string dystopia" "Slide for Reddit/Info.plist" || true
 
-          ruby -e 'require "xcodeproj"' 2>/dev/null || gem install xcodeproj --user-install
+          ruby -e 'require "xcodeproj"' 2>/dev/null || sudo gem install xcodeproj
 
           cat > /tmp/fix_project.rb <<'RUBY'
           require "xcodeproj"
@@ -35,7 +47,6 @@ workflows:
           proj.targets.dup.each { |t| t.remove_from_project unless t == main }
           proj.save
 
-          # recreate shared scheme (old one references removed targets)
           scheme = Xcodeproj::XCScheme.new
           scheme.configure_with_targets(main, nil, launch_target: true)
           scheme.save_as(proj_path, "Slide for Reddit", true)
@@ -67,7 +78,7 @@ workflows:
           echo "----- Podfile -----"; cat Podfile
 
       - name: Install CocoaPods
-        script: |
+        run: |
           pod install || pod install --repo-update
           cat > /tmp/fix_sdc.rb <<'RUBY'
           Dir["Pods/SDCAlertView/**/*.swift"].each do |f|
@@ -80,7 +91,7 @@ workflows:
           ruby /tmp/fix_sdc.rb
 
       - name: Build unsigned app
-        script: |
+        run: |
           set -o pipefail
           xcodebuild clean build \
             -workspace "Slide for Reddit.xcworkspace" \
@@ -98,7 +109,7 @@ workflows:
             ONLY_ACTIVE_ARCH=NO 2>&1 | tee build.log | grep -E "error:|BUILD SUCCEEDED|BUILD FAILED"
 
       - name: Package IPA
-        script: |
+        run: |
           APP_PATH="build/Build/Products/Release-iphoneos/Slide for Reddit.app"
           echo "Looking for app at: $APP_PATH"
           if [ ! -d "$APP_PATH" ]; then
@@ -111,6 +122,13 @@ workflows:
           cp -R "$APP_PATH" Payload/
           zip -r -y Slide_iOS12.ipa Payload
           ls -lh Slide_iOS12.ipa
-    artifacts:
-      - Slide_iOS12.ipa
-      - build.log
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slide-ios12
+          path: |
+            Slide_iOS12.ipa
+            build.log
+          if-no-files-found: warn
