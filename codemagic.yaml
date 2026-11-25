@@ -66,9 +66,20 @@ workflows:
           ruby /tmp/fix_podfile.rb
           echo "----- Podfile -----"; cat Podfile
 
-      - name: Install CocoaPods
+            - name: Install CocoaPods
         script: |
-          pod install || pod install --repo-update
+          set -e
+          echo "----- Podfile -----"; cat Podfile
+          echo "----- ls -----"; ls
+          (pod install --repo-update 2>&1 | tee pods.log) || { echo "POD INSTALL FAILED"; exit 1; }
+
+          XC="Pods/Target Support Files/Pods-Slide for Reddit/Pods-Slide for Reddit.release.xcconfig"
+          if [ ! -f "$XC" ]; then
+            echo "ERROR: xcconfig not generated"
+            ls -R Pods/Target\ Support\ Files 2>/dev/null | head -50
+            exit 1
+          fi
+
           cat > /tmp/fix_sdc.rb <<'RUBY'
           Dir["Pods/SDCAlertView/**/*.swift"].each do |f|
             txt = File.read(f)
@@ -111,6 +122,8 @@ workflows:
           cp -R "$APP_PATH" Payload/
           zip -r -y Slide_iOS12.ipa Payload
           ls -lh Slide_iOS12.ipa
-    artifacts:
+  
+          artifacts:
       - Slide_iOS12.ipa
       - build.log
+      - pods.log
