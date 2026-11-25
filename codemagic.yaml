@@ -9,7 +9,7 @@ workflows:
     scripts:
       - name: Patch Dystopia API Credentials, Remove Watch/Widgets & Fix Podfile
         script: |
-          set -e
+          set -ex
           find . -type f \( -name "*.swift" -o -name "*.plist" \) -exec sed -i '' 's/r1JeYb6X0P2QOg/XCCJPTbxgTaaQA/g' {} +
           find . -type f \( -name "*.swift" -o -name "*.plist" \) -exec sed -i '' 's|slide://ccrama|dystopia://response|g' {} +
           find . -type f -name "*.swift" -exec sed -i '' 's|/u/ccrama|/u/afterxleep|g' {} +
@@ -66,11 +66,9 @@ workflows:
           ruby /tmp/fix_podfile.rb
           echo "----- Podfile -----"; cat Podfile
 
-            - name: Install CocoaPods
+      - name: Install CocoaPods
         script: |
           set -e
-          echo "----- Podfile -----"; cat Podfile
-          echo "----- ls -----"; ls
           (pod install --repo-update 2>&1 | tee pods.log) || { echo "POD INSTALL FAILED"; exit 1; }
 
           XC="Pods/Target Support Files/Pods-Slide for Reddit/Pods-Slide for Reddit.release.xcconfig"
@@ -79,6 +77,8 @@ workflows:
             ls -R Pods/Target\ Support\ Files 2>/dev/null | head -50
             exit 1
           fi
+
+          chmod -R u+w Pods
 
           cat > /tmp/fix_sdc.rb <<'RUBY'
           Dir["Pods/SDCAlertView/**/*.swift"].each do |f|
@@ -122,8 +122,7 @@ workflows:
           cp -R "$APP_PATH" Payload/
           zip -r -y Slide_iOS12.ipa Payload
           ls -lh Slide_iOS12.ipa
-  
-          artifacts:
+    artifacts:
       - Slide_iOS12.ipa
       - build.log
       - pods.log
