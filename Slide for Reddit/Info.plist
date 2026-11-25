@@ -416,8 +416,9 @@
 			<key>CFBundleURLName</key>
 			<string>ccrama.me.Slide-for-Reddit</string>
 			<key>CFBundleURLSchemes</key>
-			<array>
-				<string>slide</string>
+			<array>				
+    <string>slide</string>
+    <string>dystopia</string>
 			</array>
 		</dict>
 	</array>
