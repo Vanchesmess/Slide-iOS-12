@@ -3,7 +3,7 @@ name: Build Slide IPA for iOS 12
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, develop]
 
 jobs:
   ios-12-build:
@@ -12,7 +12,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Select Xcode
         uses: maxim-lobanov/setup-xcode@v1
@@ -21,7 +21,7 @@ jobs:
 
       - name: Patch Dystopia API Credentials, Remove Watch/Widgets & Fix Podfile
         run: |
-          set -e
+          set -ex
           find . -type f \( -name "*.swift" -o -name "*.plist" \) -exec sed -i '' 's/r1JeYb6X0P2QOg/XCCJPTbxgTaaQA/g' {} +
           find . -type f \( -name "*.swift" -o -name "*.plist" \) -exec sed -i '' 's|slide://ccrama|dystopia://response|g' {} +
           find . -type f -name "*.swift" -exec sed -i '' 's|/u/ccrama|/u/afterxleep|g' {} +
@@ -54,8 +54,22 @@ jobs:
           ruby /tmp/fix_project.rb
 
           cat > /tmp/fix_podfile.rb <<'RUBY'
-          podfile = File.read("Podfile")
-          podfile.gsub!(/^target ['"](?!Slide for Reddit['"])[^'"]*['"] do.*?^end\n/m, "")
+          # remove every target except the main one (works for nested/indented targets too)
+          out = []
+          skip_indent = nil
+          File.readlines("Podfile").each do |line|
+            if skip_indent
+              skip_indent = nil if line =~ /^(\s*)end\b/ && $1.length == skip_indent
+              next
+            end
+            if line =~ /^(\s*)target\s+['"]([^'"]+)['"]\s+do/ && $2 != "Slide for Reddit"
+              skip_indent = $1.length
+              next
+            end
+            out << line
+          end
+          podfile = out.join
+
           patch = <<~P
             post_install do |installer|
               installer.pods_project.targets.each do |t|
@@ -79,7 +93,18 @@ jobs:
 
       - name: Install CocoaPods
         run: |
-          pod install || pod install --repo-update
+          set -e
+          (pod install --repo-update 2>&1 | tee pods.log) || { echo "POD INSTALL FAILED"; exit 1; }
+
+          XC="Pods/Target Support Files/Pods-Slide for Reddit/Pods-Slide for Reddit.release.xcconfig"
+          if [ ! -f "$XC" ]; then
+            echo "ERROR: xcconfig not generated"
+            ls -R Pods/Target\ Support\ Files 2>/dev/null | head -50
+            exit 1
+          fi
+
+          chmod -R u+w Pods
+
           cat > /tmp/fix_sdc.rb <<'RUBY'
           Dir["Pods/SDCAlertView/**/*.swift"].each do |f|
             txt = File.read(f)
@@ -125,10 +150,11 @@ jobs:
 
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: slide-ios12
           path: |
             Slide_iOS12.ipa
             build.log
+            pods.log
           if-no-files-found: warn
