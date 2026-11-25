@@ -1,0 +1,51 @@
+name: Build Slide IPA for iOS 12
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Patch Dystopia API Credentials
+        run: |
+          find . -type f \( -name "*.swift" -o -name "*.plist" \) -exec sed -i '' 's/r1JeYb6X0P2QOg/XCCJPTbxgTaaQA/g' {} +
+          find . -type f \( -name "*.swift" -o -name "*.plist" \) -exec sed -i '' 's|slide://ccrama|dystopia://response|g' {} +
+          find . -type f -name "*.swift" -exec sed -i '' 's|/u/ccrama|/u/afterxleep|g' {} +
+          /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes: string dystopia" "Slide for Reddit/Info.plist" || true
+
+      - name: Install CocoaPods
+        run: |
+          chmod -R 777 .
+          pod install || pod install --repo-update
+
+      - name: Build unsigned app
+        run: |
+          xcodebuild clean build \
+            -workspace "Slide for Reddit.xcworkspace" \
+            -scheme "Slide for Reddit" \
+            -configuration Release \
+            -sdk iphoneos \
+            -arch arm64 \
+            IPHONEOS_DEPLOYMENT_TARGET=12.0 \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            ONLY_ACTIVE_ARCH=NO \
+            SYMROOT=$(PWD)/build
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -r "build/Release-iphoneos/Slide for Reddit.app" Payload/
+          zip -r Slide_iOS12.ipa Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Slide_iOS12
+          path: Slide_iOS12.ipa
