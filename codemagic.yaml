@@ -7,15 +7,33 @@ workflows:
       xcode: latest
       cocoapods: default
     scripts:
-      - name: Patch Dystopia API Credentials & Podfile
+      - name: Patch Dystopia API Credentials, Remove Watch/Widgets & Fix Podfile
         script: |
           find . -type f \( -name "*.swift" -o -name "*.plist" \) -exec sed -i '' 's/r1JeYb6X0P2QOg/XCCJPTbxgTaaQA/g' {} +
           find . -type f \( -name "*.swift" -o -name "*.plist" \) -exec sed -i '' 's|slide://ccrama|dystopia://response|g' {} +
           find . -type f -name "*.swift" -exec sed -i '' 's|/u/ccrama|/u/afterxleep|g' {} +
           /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes: string dystopia" "Slide for Reddit/Info.plist" || true
           chmod -R 777 .
+
+          ruby -e '
+            require "xcodeproj"
+            proj = Xcodeproj::Project.open("Slide for Reddit.xcodeproj")
+            proj.targets.each do |t|
+              if t.name != "Slide for Reddit"
+                t.remove_from_project
+              end
+            end
+            proj.main_group.recursive_children.each do |child|
+              if child.is_a?(Xcodeproj::Project::Object::PBXTargetDependency) || child.is_a?(Xcodeproj::Project::Object::PBXContainerItemProxy)
+                child.remove_from_project
+              end
+            end
+            proj.save
+          '
+
           ruby -e '
             podfile = File.read("Podfile")
+            podfile.gsub!(/target '\''(?!Slide for Reddit'\'').*?end\n/m, "")
             patch = "post_install do |installer|\n  installer.pods_project.targets.each do |t|\n    t.build_configurations.each do |c|\n      c.build_settings[\"IPHONEOS_DEPLOYMENT_TARGET\"] = \"12.0\"\n      c.build_settings[\"CODE_SIGNING_ALLOWED\"] = \"NO\"\n    end\n  end\n"
             if podfile.include?("post_install do |installer|")
               podfile.sub!("post_install do |installer|", patch)
