@@ -4,19 +4,25 @@ workflows:
     max_build_duration: 60
     instance_type: mac_mini_m2
     environment:
+      # Сейчас latest = Xcode 26.6. Если упрётесь в ошибки Swift в старых Pod'ах,
+      # попробуйте закрепить 16.4 (если он есть в списке Codemagic): xcode: 16.4
       xcode: latest
       cocoapods: default
     scripts:
       - name: Patch Dystopia API Credentials, Remove Watch/Widgets & Fix Podfile
         script: |
           set -ex
-          find . -type f \( -name "*.swift" -o -name "*.plist" \) -exec sed -i '' 's/r1JeYb6X0P2QOg/XCCJPTbxgTaaQA/g' {} +
-          find . -type f \( -name "*.swift" -o -name "*.plist" \) -exec sed -i '' 's|slide://ccrama|dystopia://response|g' {} +
-          find . -type f -name "*.swift" -exec sed -i '' 's|/u/ccrama|/u/afterxleep|g' {} +
+          export LC_ALL=C
+
+          # --- API credentials / URL scheme ---
+          find . -type f \( -name "*.swift" -o -name "*.plist" \) -not -path "./.git/*" -exec sed -i '' 's/r1JeYb6X0P2QOg/XCCJPTbxgTaaQA/g' {} +
+          find . -type f \( -name "*.swift" -o -name "*.plist" \) -not -path "./.git/*" -exec sed -i '' 's|slide://ccrama|dystopia://response|g' {} +
+          find . -type f -name "*.swift" -not -path "./.git/*" -exec sed -i '' 's|/u/ccrama|/u/afterxleep|g' {} +
           /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes: string dystopia" "Slide for Reddit/Info.plist" || true
 
           ruby -e 'require "xcodeproj"' 2>/dev/null || gem install xcodeproj --user-install
 
+          # --- Xcode project: оставить только основной таргет ---
           cat > /tmp/fix_project.rb <<'RUBY'
           require "xcodeproj"
           proj_path = "Slide for Reddit.xcodeproj"
@@ -26,31 +32,63 @@ workflows:
 
           main.dependencies.dup.each(&:remove_from_project)
           main.build_phases.dup.each do |ph|
-            next unless ph.is_a?(Xcodeproj::Project::Object::PBXCopyFilesBuildPhase)
-            if ph.name.to_s =~ /watch|extension|plugin|clip/i ||
-               ["13", "16"].include?(ph.dst_subfolder_spec.to_s)
-              ph.remove_from_project
+            if ph.is_a?(Xcodeproj::Project::Object::PBXCopyFilesBuildPhase)
+              if ph.name.to_s =~ /watch|extension|plugin|clip/i ||
+                 ["13", "16"].include?(ph.dst_subfolder_spec.to_s)
+                ph.remove_from_project
+              end
+            elsif ph.is_a?(Xcodeproj::Project::Object::PBXShellScriptBuildPhase)
+              # SwiftLint (старый x86-бинарник) и Reveal не нужны для сборки
+              ph.remove_from_project if ph.name.to_s =~ /swiftlint|reveal/i
             end
           end
           proj.targets.dup.each { |t| t.remove_from_project unless t == main }
+
+          [proj, main].each do |o|
+            o.build_configurations.each do |c|
+              c.build_settings["IPHONEOS_DEPLOYMENT_TARGET"] = "12.0"
+              c.build_settings["ENABLE_USER_SCRIPT_SANDBOXING"] = "NO"
+            end
+          end
           proj.save
 
-          # recreate shared scheme (old one references removed targets)
+          # старая схема ссылается на удалённые таргеты, пересоздаём
           scheme = Xcodeproj::XCScheme.new
           scheme.configure_with_targets(main, nil, launch_target: true)
           scheme.save_as(proj_path, "Slide for Reddit", true)
           RUBY
           ruby /tmp/fix_project.rb
 
+          # --- Podfile: вырезать все таргеты кроме основного (по счётчику do/end) ---
           cat > /tmp/fix_podfile.rb <<'RUBY'
-          podfile = File.read("Podfile")
-          podfile.gsub!(/^target ['"](?!Slide for Reddit['"])[^'"]*['"] do.*?^end\n/m, "")
+          MAIN = "Slide for Reddit"
+          opens  = lambda { |l| l =~ /\bdo\s*(\|[^|]*\|)?\s*(#.*)?$/ || l =~ /^\s*(if|unless|case|begin)\b/ }
+          closes = lambda { |l| l =~ /^\s*end\b/ }
+
+          out = []
+          depth = 0
+          File.readlines("Podfile").each do |line|
+            if depth > 0
+              depth += 1 if opens.call(line)
+              depth -= 1 if closes.call(line)
+              next
+            end
+            if line =~ /^\s*target\s*\(?\s*['"]([^'"]+)['"]\s*\)?\s+do\b/ && $1 != MAIN
+              depth = 1
+              next
+            end
+            out << line
+          end
+          podfile = out.join
+          abort "Main target block not found in Podfile" unless podfile =~ /target\s*\(?\s*['"]#{MAIN}['"]/
+
           patch = <<~P
             post_install do |installer|
               installer.pods_project.targets.each do |t|
                 t.build_configurations.each do |c|
                   c.build_settings["IPHONEOS_DEPLOYMENT_TARGET"] = "12.0"
                   c.build_settings["CODE_SIGNING_ALLOWED"] = "NO"
+                  c.build_settings["ENABLE_USER_SCRIPT_SANDBOXING"] = "NO"
                   c.build_settings["GCC_TREAT_WARNINGS_AS_ERRORS"] = "NO"
                   c.build_settings["SWIFT_TREAT_WARNINGS_AS_ERRORS"] = "NO"
                 end
@@ -65,16 +103,20 @@ workflows:
           RUBY
           ruby /tmp/fix_podfile.rb
           echo "----- Podfile -----"; cat Podfile
+          if grep -nE "Tests|Widget|Watch|Extension" Podfile; then
+            echo "WARNING: Podfile still references other targets (see lines above)"
+          fi
 
       - name: Install CocoaPods
         script: |
-          set -e
-          (pod install --repo-update 2>&1 | tee pods.log) || { echo "POD INSTALL FAILED"; exit 1; }
+          set -eo pipefail
+          export COCOAPODS_DISABLE_STATS=true
+          pod install --repo-update 2>&1 | tee pods.log
 
           XC="Pods/Target Support Files/Pods-Slide for Reddit/Pods-Slide for Reddit.release.xcconfig"
           if [ ! -f "$XC" ]; then
             echo "ERROR: xcconfig not generated"
-            ls -R Pods/Target\ Support\ Files 2>/dev/null | head -50
+            ls -R "Pods/Target Support Files" 2>/dev/null | head -50
             exit 1
           fi
 
@@ -92,31 +134,41 @@ workflows:
 
       - name: Build unsigned app
         script: |
-          set -o pipefail
+          set +e
           xcodebuild clean build \
             -workspace "Slide for Reddit.xcworkspace" \
             -scheme "Slide for Reddit" \
             -configuration Release \
             -sdk iphoneos \
-            -arch arm64 \
             -derivedDataPath build \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=NO \
             IPHONEOS_DEPLOYMENT_TARGET=12.0 \
+            ENABLE_USER_SCRIPT_SANDBOXING=NO \
             GCC_TREAT_WARNINGS_AS_ERRORS=NO \
             SWIFT_TREAT_WARNINGS_AS_ERRORS=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            ONLY_ACTIVE_ARCH=NO 2>&1 | tee build.log | grep -E "error:|BUILD SUCCEEDED|BUILD FAILED"
+            CODE_SIGNING_ALLOWED=NO > build.log 2>&1
+          STATUS=$?
+          grep -E "error:|BUILD SUCCEEDED|BUILD FAILED" build.log || true
+          if [ $STATUS -ne 0 ]; then
+            echo "----- last 100 lines of build.log -----"
+            tail -n 100 build.log
+            exit $STATUS
+          fi
 
       - name: Package IPA
         script: |
+          set -e
           APP_PATH="build/Build/Products/Release-iphoneos/Slide for Reddit.app"
           echo "Looking for app at: $APP_PATH"
           if [ ! -d "$APP_PATH" ]; then
             echo "ERROR: .app bundle not found!"
-            tail -n 80 build.log
             exit 1
           fi
+          echo "MinimumOSVersion: $(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APP_PATH/Info.plist")"
+          lipo -info "$APP_PATH/Slide for Reddit" || true
           rm -rf Payload Slide_iOS12.ipa
           mkdir -p Payload
           cp -R "$APP_PATH" Payload/
