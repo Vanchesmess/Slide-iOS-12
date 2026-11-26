@@ -26,18 +26,24 @@ jobs:
         with:
           xcode-version: '16.4'
 
-      - name: Patch Dystopia API Credentials, Remove Watch/Widgets & Fix Podfile
+      - name: Patch credentials, remove Watch/Widgets, fix Podfile and sources
         run: |
           set -ex
-          export LC_ALL=C
+          export RUBYOPT="-Eutf-8:utf-8"
 
-          find . -type f \( -name "*.swift" -o -name "*.plist" \) -not -path "./.git/*" -exec sed -i '' 's/r1JeYb6X0P2QOg/XCCJPTbxgTaaQA/g' {} +
-          find . -type f \( -name "*.swift" -o -name "*.plist" \) -not -path "./.git/*" -exec sed -i '' 's|slide://ccrama|dystopia://response|g' {} +
-          find . -type f -name "*.swift" -not -path "./.git/*" -exec sed -i '' 's|/u/ccrama|/u/afterxleep|g' {} +
-          /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes: string dystopia" "Slide for Reddit/Info.plist" || true
+          # --- API credentials / URL scheme (LC_ALL=C только для sed) ---
+          LC_ALL=C find . -type f \( -name "*.swift" -o -name "*.plist" \) -not -path "./.git/*" -exec sed -i '' 's/r1JeYb6X0P2QOg/XCCJPTbxgTaaQA/g' {} +
+          LC_ALL=C find . -type f \( -name "*.swift" -o -name "*.plist" \) -not -path "./.git/*" -exec sed -i '' 's|slide://ccrama|dystopia://response|g' {} +
+          LC_ALL=C find . -type f -name "*.swift" -not -path "./.git/*" -exec sed -i '' 's|/u/ccrama|/u/afterxleep|g' {} +
+
+          # схему dystopia добавляем только если её ещё нет (в исходнике она уже есть)
+          PL="Slide for Reddit/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleURLTypes:0:CFBundleURLSchemes" "$PL" | grep -q dystopia \
+            || /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes: string dystopia" "$PL" || true
 
           ruby -e 'require "xcodeproj"' 2>/dev/null || sudo gem install xcodeproj
 
+          # --- Xcode project: оставить только основной таргет ---
           cat > /tmp/fix_project.rb <<'RUBY'
           require "xcodeproj"
           proj_path = "Slide for Reddit.xcodeproj"
@@ -53,6 +59,7 @@ jobs:
                 ph.remove_from_project
               end
             elsif ph.is_a?(Xcodeproj::Project::Object::PBXShellScriptBuildPhase)
+              # SwiftLint (старый x86-бинарник) и Reveal не нужны для сборки
               ph.remove_from_project if ph.name.to_s =~ /swiftlint|reveal/i
             end
           end
@@ -66,12 +73,14 @@ jobs:
           end
           proj.save
 
+          # старая схема ссылается на удалённые таргеты, пересоздаём
           scheme = Xcodeproj::XCScheme.new
           scheme.configure_with_targets(main, nil, launch_target: true)
           scheme.save_as(proj_path, "Slide for Reddit", true)
           RUBY
           ruby /tmp/fix_project.rb
 
+          # --- Podfile: вырезать все таргеты кроме основного (по счётчику do/end) ---
           cat > /tmp/fix_podfile.rb <<'RUBY'
           MAIN = "Slide for Reddit"
           opens  = lambda { |l| l =~ /\bdo\s*(\|[^|]*\|)?\s*(#.*)?$/ || l =~ /^\s*(if|unless|case|begin)\b/ }
@@ -94,6 +103,10 @@ jobs:
           podfile = out.join
           abort "Main target block not found in Podfile" unless podfile =~ /target\s*\(?\s*['"]#{MAIN}['"]/
 
+          # собственный post_install в Podfile ставит deployment target 11: поднимаем до 12.0
+          podfile.gsub!(/(IPHONEOS_DEPLOYMENT_TARGET['"]\]\s*=\s*)['"]11(?:\.0)?['"]/) { "#{$1}'12.0'" }
+          podfile.sub!(/^(\s*platform\s+:ios\s*,\s*)['"]11(?:\.0)?['"]/) { "#{$1}'12.0'" }
+
           patch = <<~P
             post_install do |installer|
               installer.pods_project.targets.each do |t|
@@ -115,9 +128,46 @@ jobs:
           RUBY
           ruby /tmp/fix_podfile.rb
           echo "----- Podfile -----"; cat Podfile
+          ruby -c Podfile
           if grep -nE "Tests|Widget|Watch|Extension" Podfile; then
             echo "WARNING: Podfile still references other targets (see lines above)"
           fi
+
+          # --- Патчи исходников ---
+          cat > /tmp/fix_sources.rb <<'RUBY'
+          Encoding.default_external = Encoding::UTF_8
+          Encoding.default_internal = Encoding::UTF_8
+
+          # 1) UIFontPickerViewControllerDelegate доступен только с iOS 13: помечаем всё расширение
+          f = "Slide for Reddit/SettingsFont.swift"
+          s = File.read(f, mode: "r:UTF-8")
+          unless s =~ /@available\(iOS 1[3-9][^)]*\)\s*\nextension SettingsFont: UIFontPickerViewControllerDelegate/
+            s.sub!(/^extension SettingsFont: UIFontPickerViewControllerDelegate \{/,
+                   "@available(iOS 13.0, *)\nextension SettingsFont: UIFontPickerViewControllerDelegate {") or puts("WARN: SettingsFont pattern not found")
+            File.write(f, s, mode: "w:UTF-8")
+          end
+
+          # 2) Starscream.WebSocket vs Network.WebSocket (новые SDK)
+          f = "Slide for Reddit/LiveThreadViewController.swift"
+          s = File.read(f, mode: "r:UTF-8")
+          n = s.gsub!(/(?<![.\w])WebSocket(?=\?|\()/, "Starscream.WebSocket")
+          puts("WARN: WebSocket pattern not found") unless n
+          File.write(f, s, mode: "w:UTF-8")
+
+          # 3) Без iCloud-entitlements CKContainer(identifier:) бросает NSException и роняет приложение:
+          #    отключаем iCloud-синхронизацию (fetch/save)
+          f = "Slide for Reddit/AppDelegate.swift"
+          s = File.read(f, mode: "r:UTF-8")
+          c = 0
+          s.gsub!(/^([ \t]*func (?:fetchFromiCloud|saveToiCloud)\([^\n]*\{)[ \t]*\n/) do
+            c += 1
+            "#{$1}\n        if true { return }\n"
+          end
+          puts("WARN: iCloud patch matched #{c} functions, expected 2") unless c == 2
+          File.write(f, s, mode: "w:UTF-8")
+          RUBY
+          ruby /tmp/fix_sources.rb
+          git diff --stat || true
 
       - name: Install CocoaPods
         run: |
@@ -136,10 +186,10 @@ jobs:
 
           cat > /tmp/fix_sdc.rb <<'RUBY'
           Dir["Pods/SDCAlertView/**/*.swift"].each do |f|
-            txt = File.read(f)
+            txt = File.read(f, mode: "r:UTF-8")
             new = txt.gsub(/(?<![.\w])(?<!enum )(?<!class )(?<!struct )(?<!protocol )(?<!typealias )Transition\b/,
                            "SDCAlertView.Transition")
-            File.write(f, new) if new != txt
+            File.write(f, new, mode: "w:UTF-8") if new != txt
           end
           RUBY
           ruby /tmp/fix_sdc.rb
@@ -163,29 +213,71 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO > build.log 2>&1
           STATUS=$?
-          grep -E "error:|BUILD SUCCEEDED|BUILD FAILED" build.log || true
+          grep -E "error:|BUILD SUCCEEDED|BUILD FAILED" build.log | cut -c1-400 || true
           if [ $STATUS -ne 0 ]; then
             echo "----- last 100 lines of build.log -----"
-            tail -n 100 build.log
+            tail -n 100 build.log | cut -c1-400
             exit $STATUS
           fi
 
-      - name: Package IPA
+      - name: Package IPA (unsigned + ldid fake-signed)
         run: |
           set -e
-          APP_PATH="build/Build/Products/Release-iphoneos/Slide for Reddit.app"
-          echo "Looking for app at: $APP_PATH"
-          if [ ! -d "$APP_PATH" ]; then
+          PB=/usr/libexec/PlistBuddy
+          APP_SRC="build/Build/Products/Release-iphoneos/Slide for Reddit.app"
+          echo "Looking for app at: $APP_SRC"
+          if [ ! -d "$APP_SRC" ]; then
             echo "ERROR: .app bundle not found!"
             exit 1
           fi
-          echo "MinimumOSVersion: $(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$APP_PATH/Info.plist")"
-          lipo -info "$APP_PATH/Slide for Reddit" || true
-          rm -rf Payload Slide_iOS12.ipa
-          mkdir -p Payload
-          cp -R "$APP_PATH" Payload/
-          zip -r -y Slide_iOS12.ipa Payload
-          ls -lh Slide_iOS12.ipa
+
+          rm -rf Payload Slide_iOS12.ipa Slide_iOS12_unsigned.ipa ent.plist
+          mkdir Payload
+          cp -R "$APP_SRC" Payload/
+          APP="Payload/Slide for Reddit.app"
+
+          echo "MinimumOSVersion: $($PB -c 'Print :MinimumOSVersion' "$APP/Info.plist")"
+          BID=$($PB -c 'Print :CFBundleIdentifier' "$APP/Info.plist")
+          EXE=$($PB -c 'Print :CFBundleExecutable' "$APP/Info.plist")
+          echo "Bundle ID: $BID, executable: $EXE"
+          lipo -info "$APP/$EXE" || true
+
+          # 1) чистый неподписанный IPA (для AltStore/Sideloadly и т.п.)
+          zip -qr -y Slide_iOS12_unsigned.ipa Payload
+
+          # 2) IPA с фейковой подписью ldid (для джейлбрейка + AppSync Unified)
+          HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install ldid || true
+          if command -v ldid >/dev/null 2>&1; then
+            cat > ent.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>application-identifier</key>
+            <string>$BID</string>
+            <key>get-task-allow</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+            for fw in "$APP"/Frameworks/*.framework; do
+              if [ -d "$fw" ]; then
+                fexe=$($PB -c 'Print :CFBundleExecutable' "$fw/Info.plist")
+                ldid -S "$fw/$fexe"
+              fi
+            done
+            for d in "$APP"/Frameworks/*.dylib; do
+              if [ -f "$d" ]; then ldid -S "$d"; fi
+            done
+            ldid -S"$PWD/ent.plist" "$APP/$EXE"
+            echo "----- entitlements -----"
+            ldid -e "$APP/$EXE"
+            zip -qr -y Slide_iOS12.ipa Payload
+          else
+            echo "WARNING: ldid not available, signed IPA = unsigned IPA"
+            cp Slide_iOS12_unsigned.ipa Slide_iOS12.ipa
+          fi
+          ls -lh Slide_iOS12*.ipa
 
       - name: Upload artifacts
         if: always()
@@ -194,6 +286,7 @@ jobs:
           name: slide-ios12
           path: |
             Slide_iOS12.ipa
+            Slide_iOS12_unsigned.ipa
             build.log
             pods.log
           if-no-files-found: warn
